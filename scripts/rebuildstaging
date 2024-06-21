@@ -1,0 +1,84 @@
+#!/bin/bash
+
+if ! command -v git-build-branch &> /dev/null
+then
+    echo "'git-build-branch' tool could not be found. Run 'pip install -r scripts/rebuildstaging-requirements.txt'."
+    exit 1
+fi
+
+function usage() {
+    cat << EOF
+usage: $0 [-h|--help] [-v|--verbose] [--deploy|--no-push]
+
+rebuild staging from yaml configuration (downloaded from https://github.com/dimagi/staging-branches/blob/main/formplayer-staging.yml)
+
+    -h --help       print this help text
+    -v --verbose    display debugging output
+    --deploy        deploy after rebuild is complete
+    --no-push       do not push changes (cannot be used with --deploy)
+EOF
+}
+
+while [[ $# > 0 ]]
+do
+    key="$1"
+    shift
+
+    case $key in
+      -h|--help)
+        usage
+        exit
+        ;;
+      -v|--verbose)
+        verbose=y
+        ;;
+      --deploy)
+        deploy=y
+        ;;
+      --no-push)
+        no_push=y
+        echo no-push
+        ;;
+      *)
+        usage
+        exit 1
+        ;;
+    esac
+done
+
+function rebuildstaging() {
+    REPO_ROOT='artifacts/staging-branches'
+    if [[ ! -d "$REPO_ROOT/.git" ]]
+    then
+        git clone https://github.com/dimagi/staging-branches.git "$REPO_ROOT"
+    else
+        git -C "$REPO_ROOT" pull origin main
+    fi
+
+    git -C "$REPO_ROOT" show -n 1 -- formplayer-staging.yml
+    echo "rebuilding staging branch..."
+    git-build-branch "$REPO_ROOT/formplayer-staging.yml" "$@"
+}
+
+args=''
+
+[[ $verbose = 'y' ]] && args="$args -v"
+[[ -z "$no_push" || $no_push != 'y' ]] && args="$args --push"
+
+if [[ $deploy = 'y' && $no_push != 'y' ]]
+then
+    rebuildstaging $args && {
+      echo -e "\nWait for the staging build to complete."
+      echo "Check https://jenkins.dimagi.com/job/formplayer-staging/ for the status."
+      echo -ne "\nContinue with deploy [y/n]: "
+      read -n 1 continue
+      if [ "$continue" != "y" ]; then echo "Aborting."; exit 1; fi
+      echo -e "\n\n"
+    } && {
+        which commcare-cloud \
+        && commcare-cloud --control staging deploy formplayer --quiet \
+        || echo 'Could not auto-deploy for you. Run `commcare-cloud --control staging deploy formplayer` to deploy.'
+    }
+else
+    rebuildstaging $args
+fi
